@@ -1,96 +1,112 @@
-# Voting NFT Smart Contract
+;; Define constants
+(define-constant contract-owner tx-sender)
+(define-constant err-unauthorized (err u100))
+(define-constant err-already-voted (err u101))
+(define-constant err-invalid-option (err u102))
+(define-constant err-voting-closed (err u103))
+(define-constant err-not-whitelisted (err u104))
 
-This Clarity smart contract, `vote-nft`, is designed to record votes by minting unique, non-fungible tokens (NFTs) on the Stacks blockchain. Each time a user votes, they receive an NFT representing that vote. The contract tracks the total number of votes cast and maintains a record of the number of NFTs each user has earned. This can be used in scenarios where users are incentivized to participate through NFTs, which can serve as proof of participation.
+;; Define NFT for votes
+(define-non-fungible-token vote-nft uint)
 
-## Contract Overview
+;; Define data variables
+(define-data-var total-votes uint u0)
+(define-data-var voting-start-block uint u0)
+(define-data-var voting-end-block uint u0)
 
-- **Token Name**: `vote-nft`
-- **Token Type**: Non-fungible (NFT), indexed by `uint`
-- **Data Variables**:
-  - `total-votes`: Stores the total number of votes cast.
-- **Maps**:
-  - `voter-nft-count`: Maps each voter's principal to their total number of vote NFTs earned.
+;; Define data maps
+(define-map voter-nft-count principal uint)
+(define-map whitelist principal bool)
+(define-map vote-options uint (string-ascii 50))
+(define-map vote-counts uint uint)
+(define-map has-voted principal bool)
 
-## Functions
+;; Events
+(define-public (print-event (event (string-ascii 50)) (data (string-ascii 50)))
+  (ok (print {event: event, data: data}))
+)
 
-### 1. **Voting Function**: `(vote)`
+;; Admin functions
 
-The primary purpose of this function is to register a vote from the caller and mint an NFT as proof of their participation.
+(define-public (set-voting-period (start uint) (end uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (asserts! (> end start) (err u105))
+    (var-set voting-start-block start)
+    (var-set voting-end-block end)
+    (ok true)
+  )
+)
 
-- **Parameters**: None
-- **Execution Flow**:
-  1. **Increment Total Votes**: Adds `1` to the total vote count, stored in `total-votes`.
-  2. **Mint NFT**: Assigns a new NFT (with an ID corresponding to the new vote count) to the voter.
-  3. **Update Voter's NFT Count**: Updates the voter's total vote NFT count in the `voter-nft-count` map.
-- **Return**: `ok` message upon successful vote registration and NFT minting.
-- **Errors**: Uses `try!` to handle errors during NFT minting.
+(define-public (add-voter (voter principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (map-set whitelist voter true)
+    (try! (print-event "voter_added" (to-ascii (buff-to-string-be (principal-to-buff voter)))))
+    (ok true)
+  )
+)
 
-### 2. **Get Total Votes**: `(get-total-votes)`
+(define-public (set-vote-option (id uint) (option (string-ascii 50)))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+    (map-set vote-options id option)
+    (try! (print-event "vote_option_set" (concat (uint-to-ascii id) option)))
+    (ok true)
+  )
+)
 
-A read-only function that returns the total number of votes cast.
+;; Voting function
 
-- **Parameters**: None
-- **Return**: The current value of `total-votes`, indicating the number of votes cast so far.
+(define-public (vote (option-id uint))
+  (let 
+    (
+      (voter tx-sender)
+      (current-block block-height)
+    )
+    (asserts! (>= current-block (var-get voting-start-block)) err-voting-closed)
+    (asserts! (<= current-block (var-get voting-end-block)) err-voting-closed)
+    (asserts! (default-to false (map-get? whitelist voter)) err-not-whitelisted)
+    (asserts! (not (default-to false (map-get? has-voted voter))) err-already-voted)
+    (asserts! (is-some (map-get? vote-options option-id)) err-invalid-option)
+    
+    (try! (nft-mint? vote-nft (var-get total-votes) voter))
+    (map-set voter-nft-count voter (+ (default-to u0 (map-get? voter-nft-count voter)) u1))
+    (map-set has-voted voter true)
+    (map-set vote-counts option-id (+ (default-to u0 (map-get? vote-counts option-id)) u1))
+    (var-set total-votes (+ (var-get total-votes) u1))
+    
+    (try! (print-event "vote_cast" (concat (to-ascii (buff-to-string-be (principal-to-buff voter))) (uint-to-ascii option-id))))
+    (ok "Vote registered, and NFT minted!")
+  )
+)
 
-### 3. **Get NFT Count**: `(get-nft-count)`
+;; Read-only functions
 
-A read-only function to retrieve the number of vote NFTs a specific user has.
+(define-read-only (get-total-votes)
+  (ok (var-get total-votes))
+)
 
-- **Parameters**:
-  - `voter`: Principal (the address of the voter whose NFT count is to be retrieved).
-- **Return**: The count of NFTs the specified voter has.
+(define-read-only (get-nft-count (voter principal))
+  (ok (default-to u0 (map-get? voter-nft-count voter)))
+)
 
-## Usage
+(define-read-only (get-vote-option (id uint))
+  (ok (map-get? vote-options id))
+)
 
-### 1. Voting Process
+(define-read-only (get-vote-count (option-id uint))
+  (ok (default-to u0 (map-get? vote-counts option-id)))
+)
 
-Users vote by calling the `vote` function. Each time a user votes:
-- The contract increments the `total-votes` count by `1`.
-- A unique NFT (with the current `total-votes` count as its ID) is minted to the voter.
-- The voter's NFT count is updated.
+(define-read-only (is-voter-whitelisted (voter principal))
+  (ok (default-to false (map-get? whitelist voter)))
+)
 
-### 2. Retrieving Information
+(define-read-only (has-voter-voted (voter principal))
+  (ok (default-to false (map-get? has-voted voter)))
+)
 
-To track voting activity:
-- Use `get-total-votes` to see the number of votes cast so far.
-- Use `get-nft-count` with a voter's principal to see how many NFTs they hold, representing their total votes.
-
-### Example Calls
-
-**Registering a Vote**:
-```clarity
-(contract-call? .vote-nft vote)
-```
-
-**Retrieving Total Votes**:
-```clarity
-(contract-call? .vote-nft get-total-votes)
-```
-
-**Retrieving a Voter's NFT Count**:
-```clarity
-(contract-call? .vote-nft get-nft-count <voter-principal>)
-```
-
-## Data Structures
-
-### Non-Fungible Token (NFT)
-
-- **`vote-nft`**: A non-fungible token (NFT) indexed by `uint`, representing each vote. Each unique NFT ID corresponds to an individual vote cast in the contract.
-
-### Data Variables
-
-- **`total-votes`** (`uint`): Tracks the total number of votes cast.
-
-### Maps
-
-- **`voter-nft-count`**: A mapping from each voter's principal address to their vote NFT count.
-
-## Error Handling
-
-This contract uses the `try!` function to handle errors in minting NFTs. If the NFT minting fails, the `vote` function will return an error, preventing the transaction from completing.
-
-## License
-
-This contract is released under the MIT License.
-
+(define-read-only (get-voting-period)
+  (ok {start: (var-get voting-start-block), end: (var-get voting-end-block)})
+)
